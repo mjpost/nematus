@@ -19,7 +19,7 @@ while true; do
     # Run an iteration of training lasting at most two hours. Make sure that
     # saveFreq is set low enough in config.py to save within that amount of time
     # (1000 should be sufficient though it is relatively often)
-    qsub -cwd -l gpu=1 -l h_rt=2:00:00 -S /bin/bash -V -j y -o logs/ train.sh
+    qsub -sync y -cwd -l gpu=1 -l h_rt=2:00:00 -S /bin/bash -V -j y -o logs/ train-iter.sh
 
     if [[ $iter -ge $maxiters ]]; then
         echo "Quitting."
