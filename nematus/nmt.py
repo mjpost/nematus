@@ -925,6 +925,7 @@ def train(dim_word=512,  # word vector dimensionality
           validFreq=10000,
           saveFreq=30000,   # save the parameters after every saveFreq updates
           sampleFreq=10000,   # generate some samples after every sampleFreq
+          runTime=0,   # if > 0, run for this long, save model, and quit
           datasets=[
               '/data/lisatmp3/chokyun/europarl/europarl-v7.fr-en.en.tok',
               '/data/lisatmp3/chokyun/europarl/europarl-v7.fr-en.fr.tok'],
@@ -1022,12 +1023,14 @@ def train(dim_word=512,  # word vector dimensionality
     # reload training progress
     training_progress_file = saveto + '.progress.json'
     if reload_ and reload_training_progress and os.path.exists(training_progress_file):
-        print 'Reloading training progress'
+        print 'Reloading training progress from %s...' % (training_progress_file)
         training_progress.load_from_json(training_progress_file)
         if (training_progress.estop == True) or (training_progress.eidx > max_epochs) or (training_progress.uidx >= finish_after):
             print >> sys.stderr, 'Training is already complete. Disable reloading of training progress (--no_reload_training_progress) or remove or modify progress file (%s) to train anyway.' % training_progress_file
             return numpy.inf
 
+    if runTime > 0:
+        print 'Will run for {} seconds, save model, and quit'.format(runTime)
 
     print 'Loading data'
     if use_domain_interpolation:
@@ -1198,11 +1201,26 @@ def train(dim_word=512,  # word vector dimensionality
     last_disp_samples = 0
     last_words = 0
     ud_start = time.time()
+    start_uidx = training_progress.uidx
     p_validation = None
     for training_progress.eidx in xrange(training_progress.eidx, max_epochs):
         n_samples = 0
 
         for x, y in train:
+            if runTime > 0 and training_progress.uidx > start_uidx:
+                now_time = time.time()
+                mean_time = 1.0 * (int(now_time - ud_start)) / (training_progress.uidx - start_uidx)
+                pct_complete = 1.0 * (now_time + mean_time * 2 - comp_start) / runTime
+                # print "runtime %d uidx %d start_uidx %d now %d mean %.2f pct %.2f" % (runTime, training_progress.uidx, start_uidx, now_time, mean_time, pct_complete)
+
+                if pct_complete >= 0.95:
+                    params = unzip_from_theano(tparams, excluding_prefix='prior_')
+                    optimizer_params = unzip_from_theano(optimizer_tparams, excluding_prefix='prior_')
+                    save_model(dict(params, **optimizer_params), training_progress)
+
+                    print 'Stopping after %d seconds (%.2f%% of allotted time)' % (now_time - comp_start, pct_complete * 100)
+                    return
+
             training_progress.uidx += 1
             use_noise.set_value(1.)
 
@@ -1343,15 +1361,35 @@ def train(dim_word=512,  # word vector dimensionality
                 last_words = 0
                 cost_sum = 0
 
-            def save_model(path, both_params, training_progress, model_options = None):
-                print 'Saving the model to {}...'.format(path),
+            def save_model(both_params, training_progress, uid_too = False):
+                """
+                Saves the model to the main model file. If uid_too is True,
+                it will also write out a UID-stamped version for posterity.
+                Returns the list of model files that are written (i.e., a list of 
+                one or two files nmaes).
+                """
+                files = []
 
-                numpy.savez(path, **both_params)
-                training_progress.save_to_json(path+'.progress.json')
-                if model_options is not None:
-                    json.dump(model_options, open('{}.json'.format(path), 'wb'), indent=2)
+                print 'Saving the model to {}...'.format(saveto),
+                numpy.savez(saveto, **both_params)
+                training_progress.save_to_json('{}.progress.json'.format(saveto))
+                files.append(saveto)
+
+                if uid_too:
+                    iteration = training_progress.uidx
+                    print 'Saving the model at iteration {}...'.format(iteration),
+                    saveto_uidx = '{}.iter{}.npz'.format(
+                        os.path.splitext(saveto)[0], training_progress.uidx)
+
+                    both_params = dict(unzip_from_theano(tparams, excluding_prefix='prior_'), **unzip_from_theano(optimizer_tparams, excluding_prefix='prior_'))
+                    numpy.savez(saveto_uidx, **both_params)
+                    training_progress.save_to_json(saveto_uidx+'.progress.json')
+
+                    json.dump(model_options, open('%s.json' % (saveto_uidx), 'wb'), indent=2)
+                    files.append(saveto_uidx)
 
                 print 'Done'
+                return files
 
             # save the best model so far, in addition, save the latest model
             # into a separate file with the iteration number for external eval
@@ -1364,17 +1402,8 @@ def train(dim_word=512,  # word vector dimensionality
                     params = unzip_from_theano(tparams, excluding_prefix='prior_')
                     optimizer_params = unzip_from_theano(optimizer_tparams, excluding_prefix='prior_')
 
-                save_model(saveto, dict(params, **optimizer_params), training_progress)
+                save_model(dict(params, **optimizer_params), training_progress, True)
                 print 'Done'
-
-                # save with uidx
-                if not overwrite:
-                    saveto_uidx = '{}.iter{}.npz'.format(
-                        os.path.splitext(saveto)[0], training_progress.uidx)
-
-                    params = unzip_from_theano(tparams, excluding_prefix='prior_')
-                    optimizer_params = unzip_from_theano(optimizer_tparams, excluding_prefix='prior_')
-                    save_model(saveto_uidx, dict(params, **optimizer_params), training_progress)
 
             # generate some samples with the model and display them
             if sampleFreq and numpy.mod(training_progress.uidx, sampleFreq) == 0:
@@ -1475,10 +1504,8 @@ def train(dim_word=512,  # word vector dimensionality
 
                     params = unzip_from_theano(tparams, excluding_prefix='prior_')
                     optimizer_params = unzip_from_theano(optimizer_tparams, excluding_prefix='prior_')
-                    saveto_uidx = '{}.iter{}.npz'.format(
-                        os.path.splitext(saveto)[0], training_progress.uidx)
-                    save_model(saveto_uidx, dict(params, **optimizer_params), training_progress, model_options)
-                    p_validation = Popen([external_validation_script, saveto_uidx])
+                    saved = save_model(dict(params, **optimizer_params), training_progress, True)
+                    p_validation = Popen([external_validation_script, saved[-1]])
 
             # finish after this many updates
             if training_progress.uidx >= finish_after:
